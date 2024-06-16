@@ -1,0 +1,404 @@
+import requests
+from bs4 import BeautifulSoup
+import re
+import os
+import subprocess
+import shutil
+# import zipfile
+import time
+from discord_webhook import DiscordWebhook, DiscordEmbed
+from datetime import datetime
+import threading
+
+
+# Discord Webhook URL and Avatar
+discord_webhook_url = "https://discord.com/api/webhooks/1220154039216378016/eW2v_tGBwi0B4sz9CWlUpkGb-DFHtGDkf7Cs2OP5h5gDuyBE3cHCh7qUgsgtXaKtDNSu"
+avatar_url='https://dl.dropboxusercontent.com/scl/fi/nspfpkt7ppkeyvz64j2ge/New-Project.png?rlkey=h8u5gecwqaha0f7aurcy50joq&dl=0'
+
+
+formatted_time = ""
+iPhone_Version = "iPhone13ProMax"
+iPhone_ID = "14,3"
+url = f"https://ipsw.me/iPhone{iPhone_ID}"
+install_URL = f"https://ipsw.me/install/iPhone{iPhone_ID}"
+Old_URL = f"https://ipsw.pro/iPhone/iPhone{iPhone_ID}/"
+files_to_keep = ["Unknown.bundle", "Default.bundle", "CWW_US.bundle", "ChinaTelecom_cn.bundle", "", "CellularSouth_LTE_US.bundle", "ChinaTelecom_USIM_cn.bundle", "ChinaTelecom_hk.bundle", "USCellular_LTE_US.bundle"]
+main_thread = threading.main_thread()
+
+def updateTime():                                               # Makes the date always updated
+    global formatted_time
+    while True:
+        if not main_thread.is_alive():
+            break
+        formatted_time = datetime.now()
+        formatted_time = formatted_time.strftime("at %I:%M %p")
+        time.sleep(1)
+
+time_thread = threading.Thread(target=updateTime)               # Starts the updateTime as a thread
+time_thread.start()
+
+
+def monitorThreads():
+    while True:
+        if main_thread.is_alive():
+            main_state = "started"
+        else:
+            main_state = "stopped"
+            shutil.rmtree(folder_path)
+            break
+        time.sleep(1)
+
+monitor_thread = threading.Thread(target=monitorThreads)
+monitor_thread.start()
+monitor_thread
+time_thread
+
+def extractOldDownloadURL(iOS_version):
+    url = f"{Old_URL}{iOS_version}"                             # Construct the URL
+    response = requests.get(url)                                # Fetch the HTML content of the webpage
+    
+    if response.status_code == 200:                             # Check if request was successful
+        soup = BeautifulSoup(response.content, 'html.parser')   # Parse the HTML content
+        download_link = soup.find('a', class_='btn-primary')    # Find the download link
+    
+        
+        if download_link:                                       # Extract the href attribute from the download link
+            download_url = download_link['href']
+            return download_url
+        else:
+            print("Download link not found.")
+            return None
+    else:
+        print("Failed to fetch webpage.")
+        return None
+
+def extractDownloadURL(url):
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    download_link = soup.find(id="downloadURL")
+    print(download_link)
+    if download_link:
+        download_url = download_link.get('href')
+        return download_url
+    else:
+        return None
+
+
+def downloadFile(url, file_path):
+    if not os.path.exists(file_path):
+        try:
+            subprocess.run(['wget', '-O', file_path, '-t', '3', '--timeout=40', '--waitretry=20', url],
+                           check=True)
+            print(f"\nDownloaded: {file_path}")
+            start_message = f"### Downloaded the firmware.\n\n{formatted_time}"
+            webhook = DiscordWebhook(url=discord_webhook_url, content=start_message)
+            response = webhook.execute()
+            return True
+        except subprocess.CalledProcessError:
+            print(f"Failed to download file: {url}")
+            start_message = f"### Failed to Download the firmware.\n\n{formatted_time}"
+            webhook = DiscordWebhook(url=discord_webhook_url, content=start_message)
+            response = webhook.execute()
+            return False
+    else:
+        print(f"File already exists: {file_path}. Skipping.")
+        return True
+
+
+def unarchiveIPSW(ipsw_file, output_dir):
+    subprocess.run(['7z', 'x', ipsw_file, '-o' + output_dir])
+    start_message = f"### Extracted the firmware.\n\n{formatted_time}"
+    webhook = DiscordWebhook(url=discord_webhook_url, content=start_message)
+    response = webhook.execute()
+
+
+def extractCarrierBundles(ipsw_folder):
+    volumes_path = '/Volumes/'
+    volumes = [volume for volume in os.listdir(volumes_path) if volume != 'Hackintosh']         # Get a list of volumes except Hackintosh
+    if volumes:
+        volume_path = os.path.join(volumes_path, volumes[0])                                    # Assuming the first volume is the correct one, navigate to it
+        carrier_bundles_path = os.path.join(volume_path, "System/Library/Carrier Bundles")
+
+        if os.path.exists(carrier_bundles_path):
+            destination_path = os.path.join(ipsw_folder, "Carrier Bundles")
+            shutil.copytree(carrier_bundles_path, destination_path)
+            print("Carrier Bundles extracted successfully.")
+            for volume in volumes:                                                              # Detach all volumes (except Hackintosh) after extraction
+                volume_path = os.path.join(volumes_path, volume)
+                subprocess.run(['hdiutil', 'detach', volume_path])
+                print(f"Detached volume: {volume_path}")
+        else:
+            print("Carrier Bundles not found.")
+    else:
+        print("No mounted volumes found.")
+
+
+def deleteExceptCarrierBundle(ipsw_folder):
+    files_to_delete = [file for file in os.listdir(ipsw_folder) if file != "Carrier Bundles"]
+    for file_to_delete in files_to_delete:
+        file_to_delete_path = os.path.join(ipsw_folder, file_to_delete)
+        subprocess.run(['rm', '-rf', file_to_delete_path])
+
+
+def mountBiggestDmg(ipsw_folder):
+    files = os.listdir(ipsw_folder)
+    dmg_files = [file for file in files if file.endswith('.dmg')]
+    if not dmg_files:
+        print("No .dmg files found.")
+        return None
+    biggest_dmg = max(dmg_files, key=lambda x: os.path.getsize(os.path.join(ipsw_folder, x)))
+    subprocess.run(['hdiutil', 'attach', os.path.join(ipsw_folder, biggest_dmg)])
+    return biggest_dmg
+
+
+def removeAllFilesInAFolder(remove_path):
+    for filename in os.listdir(remove_path):
+        file_path2 = os.path.join(remove_path, filename)
+        try:
+            if os.path.isfile(file_path2):
+                os.unlink(file_path2)
+            elif os.path.isdir(file_path2):
+                removeAllFilesInAFolder(file_path2)
+        except Exception as e:
+            print(f"Failed to delete {file_path2}. Reason: {e}")
+
+
+def zipFolder(whattozip, zip_path):
+    os.makedirs(os.path.dirname(zip_path), exist_ok=True)
+    subprocess.run(["7z", "a", "-tzip", zip_path, whattozip]) 
+    
+def createTheIPCC(bundle_folder, bundle_name, versioninfo, bundle_output, ud_bundle_folder, payload_folder, payload_folder_ud,):
+    Path = os.path.join(bundle_folder, bundle_name)
+    if os.path.exists(Path):
+        zip_path = os.path.join(bundle_folder, f"{iPhone_Version}_{(lambda x: x.replace(' ', '_'))(versioninfo)}_{bundle_output}")
+        shutil.copytree(Path, ud_bundle_folder, dirs_exist_ok=True)
+        os.makedirs(payload_folder, exist_ok=True)                                                            # Create Payload folder and copy Unknown.bundle inside it
+        os.makedirs(payload_folder_ud, exist_ok=True)
+        shutil.copytree(ud_bundle_folder, payload_folder_ud, dirs_exist_ok=True)
+        zipFolder(payload_folder, zip_path)                                                                   # Zip the Payload folder
+
+def addCommitAndPushToGit(folder_path, iPhone_Version, versioninfo):
+    add_result = subprocess.run(['git', 'add', os.path.join(folder_path)], capture_output=True)               # Add generated .ipcc files to git
+    if add_result.returncode != 0:
+        print("Error adding files to Git.")
+        return False
+    commit_message = f"Added {iPhone_Version} {versioninfo}.ipcc files"                                       # Commit the changes with a meaningful message
+    commit_result = subprocess.run(['git', 'commit', '-m', commit_message], capture_output=True)
+    if commit_result.returncode != 0:
+        print("Error committing changes to Git.")
+        return False
+    push_result = subprocess.run(['git', 'push', '-f', 'origin', 'master'], capture_output=True)              # Push to remote repository
+    if push_result.returncode != 0:
+        print("Error pushing changes to Git remote repository.")
+        return False
+    return True
+
+
+def createIPCCFiles(bundle_folder, versioninfo, folder_path):
+    unknown_bundle_folder = os.path.join(bundle_folder, "Unknown.bundle")
+    default_bundle_folder = os.path.join(bundle_folder, "Default.bundle")
+    payload_folder = os.path.join(bundle_folder, "Payload")
+    payload_folder_with_u = os.path.join(bundle_folder, "Payload", "Unknown.bundle")
+    payload_folder_with_d = os.path.join(bundle_folder, "Payload", "Default.bundle")
+    zip_path = os.path.join(bundle_folder, "CellularSouth.ipcc")
+
+    removeAllFilesInAFolder(unknown_bundle_folder)                                        # Remove all files and subfolders inside Unknown.bundle and Default.bundle
+    removeAllFilesInAFolder(default_bundle_folder)
+    subprocess.run(['mv', default_bundle_folder, os.path.join(bundle_folder, "default.bundle") ])
+    default_bundle_folder = os.path.join(bundle_folder, "default.bundle")
+    payload_folder_with_d = os.path.join(bundle_folder, "Payload", "default.bundle")
+
+    subprocess.run(['mv', unknown_bundle_folder, os.path.join(bundle_folder, "unknown.bundle") ])
+    unknown_bundle_folder = os.path.join(bundle_folder, "unknown.bundle")
+    payload_folder_with_u = os.path.join(bundle_folder, "Payload", "unknown.bundle")
+    for filename in os.listdir(bundle_folder):                                            # Copy required files
+        file_path = os.path.join(bundle_folder, filename)
+        if filename not in files_to_keep:
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+            elif os.path.isdir(file_path):
+                shutil.rmtree(file_path)
+
+    createTheIPCC(bundle_folder, "CellularSouth_LTE_US.bundle", versioninfo, "CellularSouthLTE.ipcc", unknown_bundle_folder, payload_folder, payload_folder_ud=payload_folder_with_u)
+    createTheIPCC(bundle_folder, "ChinaTelecom_hk.bundle", versioninfo, "ChinaHK.ipcc", unknown_bundle_folder, payload_folder, payload_folder_ud=payload_folder_with_u)
+    createTheIPCC(bundle_folder, "ChinaTelecom_USIM_cn.bundle", versioninfo, "ChinaUSIM.ipcc", unknown_bundle_folder, payload_folder, payload_folder_ud=payload_folder_with_u)
+    createTheIPCC(bundle_folder, "USCellular_LTE_US.bundle", versioninfo, "USCellularLTE.ipcc", unknown_bundle_folder, payload_folder, payload_folder_ud=payload_folder_with_u)
+    createTheIPCC(bundle_folder, "ChinaTelecom_cn.bundle", versioninfo, "China.ipcc", unknown_bundle_folder, payload_folder, payload_folder_ud=payload_folder_with_u)
+    createTheIPCC(bundle_folder, "CWW_US.bundle", versioninfo, "CWW.ipcc", unknown_bundle_folder, payload_folder, payload_folder_ud=payload_folder_with_u)
+
+    filesdir = os.listdir(bundle_folder)
+    os.makedirs(f"{folder_path}/Using Unknown Bundle", exist_ok=True)    
+
+    for file in filesdir:
+        if file.endswith('.ipcc'):
+            source_file = os.path.join(bundle_folder, file)
+            destination_file = os.path.join(f"{folder_path}/Using Unknown Bundle", file)
+            shutil.move(source_file, destination_file)
+    zipFolder(os.path.join(f"{folder_path}/Using Unknown Bundle"), f"{folder_path}/{iPhone_Version} {versioninfo} Using Unknown Bundle.zip")
+
+    if os.path.exists(f"{payload_folder}/Unknown.bundle"):
+        if os.path.isdir(f"{payload_folder}/Unknown.bundle"):
+            shutil.rmtree(f"{payload_folder}/Unknown.bundle")
+        elif os.path.isfile(f"{payload_folder}/Unknown.bundle"):
+            os.remove(f"{payload_folder}/Unknown.bundle")
+
+    elif os.path.exists(payload_folder_with_u):
+        if os.path.isdir(payload_folder_with_u):
+            shutil.rmtree(payload_folder_with_u)
+        elif os.path.isfile(payload_folder_with_u):
+            os.remove(payload_folder_with_u)
+    
+    # shutil.rmtree(f"{folder_path}/Using Unknown Bundle")
+
+    createTheIPCC(bundle_folder, "CellularSouth_LTE_US.bundle", versioninfo, "CellularSouthLTE.ipcc", default_bundle_folder, payload_folder, payload_folder_ud=payload_folder_with_d)
+    createTheIPCC(bundle_folder, "ChinaTelecom_hk.bundle", versioninfo, "ChinaHK.ipcc", default_bundle_folder, payload_folder, payload_folder_ud=payload_folder_with_d)
+    createTheIPCC(bundle_folder, "ChinaTelecom_USIM_cn.bundle", versioninfo, "ChinaUSIM.ipcc", default_bundle_folder, payload_folder, payload_folder_ud=payload_folder_with_d)
+    createTheIPCC(bundle_folder, "USCellular_LTE_US.bundle", versioninfo, "USCellularLTE.ipcc", default_bundle_folder, payload_folder, payload_folder_ud=payload_folder_with_d)
+    createTheIPCC(bundle_folder, "ChinaTelecom_cn.bundle", versioninfo, "China.ipcc", default_bundle_folder, payload_folder, payload_folder_ud=payload_folder_with_d)
+    createTheIPCC(bundle_folder, "CWW_US.bundle", versioninfo, "CWW.ipcc", default_bundle_folder, payload_folder, payload_folder_ud=payload_folder_with_d)
+
+    filesdir = os.listdir(bundle_folder)
+    os.makedirs(f"{folder_path}/Using Default Bundle", exist_ok=True)    
+
+    for file in filesdir:
+        if file.endswith('.ipcc'):
+            source_file = os.path.join(bundle_folder, file)
+            destination_file = os.path.join(f"{folder_path}/Using Default Bundle", file)
+            shutil.move(source_file, destination_file)
+    
+    zipFolder(os.path.join(f"{folder_path}/Using Default Bundle"), f"{folder_path}/{iPhone_Version} {versioninfo} Using Default Bundle.zip")
+
+    # shutil.rmtree(f"{folder_path}/Using Default Bundle")
+    carrierBundleDel = os.path.join(folder_path, "Carrier Bundles")
+    shutil.rmtree(carrierBundleDel)
+
+    versioninfo = versioninfo.replace("_", " ")
+
+    addCommitAndPushToGit(folder_path, iPhone_Version, versioninfo)
+    if addCommitAndPushToGit:
+        start_message = f"### Uploaded the IPCC.\n\n{formatted_time}"
+        webhook = DiscordWebhook(url=discord_webhook_url, content=start_message)
+        response = webhook.execute()
+
+
+def retryIfError(version_info, folder_path):
+    retry_limit = 3
+    retry_count = 0
+    while retry_count < retry_limit:
+        try:
+            createIPCCFiles(carrier_bundle_folder, version_info, folder_path)
+            break                                                                # If everything succeeds without raising an error, break out of the loop
+        except FileNotFoundError as e:
+            retry_count += 1
+            print(f"Attempt {retry_count}: Error occurred - {e}")
+            if retry_count == retry_limit:
+                print(f"Failed to execute the process for firmware {version_info}. Skipping.")
+                return False
+            print(f"Retrying after 3 seconds...")
+            time.sleep(3)
+    return True
+
+
+
+
+
+
+response = requests.get(url)                            # Send a GET request
+soup = BeautifulSoup(response.text, 'html.parser')      # Parse HTML content
+
+firmwares = soup.find_all(class_='firmware')            # Find all firmware versions
+print("Number of firmware elements found:", len(firmwares))
+
+
+if firmwares:                                           # Check if there are any firmware versions found
+    for index, firmware in enumerate(firmwares):
+        version_info = firmware.find_next('td').find_next('td').get_text().strip()
+        print(f"Firmware {index + 1}: {version_info}")
+
+        folder_path = os.path.join(os.getcwd(), iPhone_Version, re.sub(r'\s*\([^()]*\)', '', (lambda x: re.sub(r'\s*\([^()]*\)', '', x))(version_info)))
+        if os.path.exists(folder_path):
+            print(f"Folder already exists: {folder_path}. Checking files.")
+            if os.path.exists(f"{folder_path}/Using Unknown Bundle") and os.path.exists(f"{folder_path}/Using Default Bundle"):
+                print("Good to go")
+                continue
+            else:
+                print(f"The folder does not have the right files. Deleting and re-downloading.")
+                shutil.rmtree(folder_path)
+        else:
+            print(f"No folder found for {version_info}")
+        
+
+        version_number = re.search(r'\((.*?)\)', version_info).group(1)
+        cleaned_version = version_number.replace('(', '').replace(')', '')
+
+        version_info = re.sub(r'\s*\([^()]*\)', '', version_info)              # Removed the ()
+        os.makedirs(folder_path)
+
+        embed = DiscordEmbed(title=f'**Processing {iPhone_Version} {version_info}**', description=f'The server is extracting {iPhone_Version} {version_info} ...')          # Create an embedded message
+        embed.set_timestamp()
+        embed.set_author(name="Abdullah Albanna")
+        embed.set_color(color=0x00FF00)
+
+        webhook = DiscordWebhook(url=f'{discord_webhook_url}', avatar_url=f'{avatar_url}')                                                                                 # Create the webhook message
+        webhook.add_embed(embed)
+
+        response = webhook.execute()
+
+        version_info_stripped = ''.join(re.findall(r'\b\d+\b(?![^(]*\))', version_info))
+
+        if float(version_info_stripped[:2]) <= 12:
+            url = f"{Old_URL}/{cleaned_version}" 
+            print("Constructed URL:", url)
+            download_url = extractOldDownloadURL(cleaned_version)
+            print("Download URL:", download_url)
+        else:
+            url = f"{install_URL}/{cleaned_version}"
+            print("Constructed URL:", url)
+
+            download_url = extractDownloadURL(url)
+            print("Download URL:", download_url)
+
+
+
+        while True:
+            if not download_url:
+                if "https://ipsw.pro" in url:
+                    print("Switching to the Other URLs Provider")
+                    url = f"{install_URL}/{cleaned_version}"
+                    print("Constructed URL:", url)
+
+                    download_url = extractDownloadURL(url)
+                    print("Download URL:", download_url)
+                elif "https://ipsw.me" in url:
+                    print("Switching to the Other URLs Provider")
+                    url = f"{Old_URL}/{cleaned_version}"
+                    print("Constructed URL:", url)
+
+                    download_url = extractOldDownloadURL(url)
+                    print("Download URL:", download_url)
+
+            if download_url:
+                file_path = os.path.join(folder_path, f"{version_info}.ipsw")
+                if downloadFile(download_url, file_path):                      # If download is successful, proceed with subsequent steps
+                    unarchiveIPSW(file_path, folder_path)
+                    mountBiggestDmg(folder_path)
+                    extractCarrierBundles(folder_path)
+                    deleteExceptCarrierBundle(folder_path)
+                    carrier_bundle_folder = os.path.join(folder_path, "Carrier Bundles", "iPhone")
+                    if not retryIfError(version_info, folder_path):            # Retry the entire process if an error occurs during IPCC file creation
+                        break
+                    else:
+                        # Successful execution, break the loop and move to the next firmware version
+                        start_message = f"### {iPhone_Version} {version_info} is Done!.\n\n{formatted_time}"
+                        webhook = DiscordWebhook(url=discord_webhook_url, content=start_message)
+                        response = webhook.execute()
+                        break
+                else:
+                    print("Retrying download after 3 seconds...")
+                    time.sleep(3)
+            else:
+                print(f"No download URL found for version {cleaned_version}. Using the other URL Provider")
+                shutil.rmtree(folder_path)                                     # Clean up by removing the empty folder
+                break
+else:
+    print("No firmware versions found on the page.")
